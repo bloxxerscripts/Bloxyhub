@@ -10,11 +10,15 @@ app.use(express.json());
 // CONFIG
 // ============================================================
 
+// Replace this with your actual LootLabs link.
 const LOOTLABS_LINK_BASE =
     process.env.LOOTLABS_LINK_BASE ||
     "https://loot-link.com/s?YOUR_LOOTLABS_ID";
 
-const KEY_LIFETIME = 12 * 60 * 60 * 1000;
+// Keys expire after 5 hours.
+const KEY_LIFETIME = 5 * 60 * 60 * 1000;
+
+// Unfinished LootLabs claims expire after 30 minutes.
 const CLAIM_LIFETIME = 30 * 60 * 1000;
 
 // ============================================================
@@ -39,12 +43,14 @@ function createKey() {
 function cleanOldData() {
     const now = Date.now();
 
+    // Remove expired claims
     for (const [claimId, claim] of claims.entries()) {
         if (now - claim.createdAt > CLAIM_LIFETIME) {
             claims.delete(claimId);
         }
     }
 
+    // Remove expired keys
     for (const [key, keyData] of keys.entries()) {
         if (now > keyData.expiresAt) {
             keys.delete(key);
@@ -52,6 +58,7 @@ function cleanOldData() {
     }
 }
 
+// Clean expired data every 5 minutes.
 setInterval(cleanOldData, 5 * 60 * 1000);
 
 // ============================================================
@@ -166,7 +173,9 @@ app.get("/api/lootlabs-postback", (req, res) => {
         "[Key Generated] Key=" +
         generatedKey +
         " UserID=" +
-        claim.userId
+        claim.userId +
+        " ExpiresAt=" +
+        new Date(createdAt + KEY_LIFETIME).toISOString()
     );
 
     res.status(200).send("OK");
