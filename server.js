@@ -1,93 +1,402 @@
-const express = require('express');
-const crypto = require('crypto');
-const app = express();
+constexpress=require("express");
+constcrypto=require("crypto");
+
+constapp=express();
 
 app.use(express.json());
 
-// In-memory key database (For production, consider using MongoDB / Quick.db)
-const activeKeys = new Map();
+constPORT=process.env.PORT||3000;
 
-// YOUR CONFIGURATION
-const PORT = process.env.PORT || 3000;
-const LOOTLABS_LINK_BASE = "https://loot-link.com/s?YOUR_LOOTLABS_ID"; // Replace with your actual LootLabs link
+//============================================================
+//CONFIG
+//============================================================
 
-// ----------------------------------------------------
-// 1. HOME ROUTE (Fixes "Cannot GET /")
-// ----------------------------------------------------
-app.get('/', (req, res) => {
-    res.send('BloxyHub Key System Backend is Live!');
+//PutyourREALLootLabslinkhere.
+//
+//Example:
+//https://loot-link.com/s?abcdef
+//
+constLOOTLABS_LINK_BASE=
+process.env.LOOTLABS_LINK_BASE||
+"https://loot-link.com/s?YOUR_LOOTLABS_ID";
+
+//Howlonggeneratedkeysremainvalid.
+//12hours=12*60*60*1000
+constKEY_LIFETIME=12*60*60*1000;
+
+//HowlonganunfinishedLootLabsclaimremainsvalid.
+//ThispreventsoldclaimIDsfromstayingaroundforever.
+constCLAIM_LIFETIME=30*60*1000;
+
+//============================================================
+//TEMPORARYDATABASE
+//============================================================
+//
+//claims:
+//claimId->{
+//userId,
+//createdAt,
+//completed,
+//uniqueId
+//}
+//
+//keys:
+//key->{
+//userId,
+//createdAt,
+//expiresAt
+//}
+//
+//NOTE:
+//Thisismemory-based.Ifyourhostingservicerestarts,
+//thesevaluesdisappear.
+//
+//Later,thiscanbemovedtoadatabase.
+//============================================================
+
+constclaims=newMap();
+constkeys=newMap();
+
+//============================================================
+//HELPERS
+//============================================================
+
+functioncreateRandomId(bytes=16){
+returncrypto.randomBytes(bytes).toString("hex");
+}
+
+functioncreateKey(){
+return(
+"BLOXY-"+
+crypto.randomBytes(8).toString("hex").toUpperCase()
+);
+}
+
+functioncleanOldData(){
+constnow=Date.now();
+
+//Removeexpiredclaims
+for(const[claimId,claim]ofclaims.entries()){
+if(now-claim.createdAt>CLAIM_LIFETIME){
+claims.delete(claimId);
+}
+}
+
+//Removeexpiredkeys
+for(const[key,keyData]ofkeys.entries()){
+if(now>keyData.expiresAt){
+keys.delete(key);
+}
+}
+}
+
+//Cleanolddataevery5minutes
+setInterval(cleanOldData,5*60*1000);
+
+//============================================================
+//HOME
+//============================================================
+
+app.get("/",(req,res)=>{
+res.status(200).send("BloxyHubKeySystemBackendisLive!");
 });
 
-// ----------------------------------------------------
-// 2. GET LINK ENDPOINT (Called by Roblox)
-// Returns LootLabs link with Roblox userId in the 'puid' parameter
-// ----------------------------------------------------
-app.get('/api/get-link', (req, res) => {
-    const userId = req.query.userId;
-    if (!userId) {
-        return res.status(400).json({ error: 'Missing userId parameter' });
-    }
+//============================================================
+//GETLOOTLABSLINK
+//============================================================
+//
+//Robloxcalls:
+//
+//GET/api/get-link?userId=123456
+//
+//TheservercreatesarandomclaimID.
+//
+//ExamplereturnedURL:
+//
+//https://loot-link.com/s?abcdef&puid=RANDOM_CLAIM_ID
+//
+//LootLabslatersendsthatpuidbacktousas:
+//click_id=RANDOM_CLAIM_ID
+//============================================================
 
-    // Embed the Roblox userId into LootLabs via puid
-    const generatedLink = `${LOOTLABS_LINK_BASE}&puid=${userId}`;
-    res.json({ link: generatedLink });
+app.get("/api/get-link",(req,res)=>{
+constuserId=String(req.query.userId||"").trim();
+
+if(!userId){
+returnres.status(400).json({
+success:false,
+error:"MissinguserIdparameter"
+});
+}
+
+//Basicvalidation
+if(!/^\d+$/.test(userId)){
+returnres.status(400).json({
+success:false,
+error:"InvalidRobloxuserId"
+});
+}
+
+//CreatearandomclaimID
+constclaimId=createRandomId(18);
+
+claims.set(claimId,{
+userId,
+createdAt:Date.now(),
+completed:false,
+uniqueId:null
 });
 
-// ----------------------------------------------------
-// 3. LOOTLABS POSTBACK ENDPOINT
-// LootLabs sends a request here when a user completes the link
-// ----------------------------------------------------
-app.get('/api/lootlabs-postback', (req, res) => {
-    const userId = req.query.click_id; // LootLabs returns puid as click_id
-    const uniqueId = req.query.unique_id;
+//AddpuidtotheLootLabslink
+constseparator=LOOTLABS_LINK_BASE.includes("?")
+?"&"
+:"?";
 
-    if (!userId) {
-        return res.status(400).send('Missing click_id');
-    }
+constlootLabsLink=
+`${LOOTLABS_LINK_BASE}${separator}puid=${encodeURIComponent(claimId)}`;
 
-    // Generate a secure 12-character key for the user
-    const generatedKey = "BLOXY-" + crypto.randomBytes(4).toString('hex').toUpperCase();
-    
-    // Save key valid for 24 hours (86400000 ms)
-    const expiresAt = Date.now() + (24 * 60 * 60 * 1000);
-    activeKeys.set(generatedKey, { userId, expiresAt });
+console.log(
+`[ClaimCreated]UserID=${userId}ClaimID=${claimId}`
+);
 
-    console.log(`[Key Generated] Key: ${generatedKey} for Roblox UserID: ${userId}`);
-
-    // Standard LootLabs response
-    res.status(200).send('OK');
+returnres.json({
+success:true,
+link:lootLabsLink
+});
 });
 
-// ----------------------------------------------------
-// 4. VERIFY KEY ENDPOINT (Called by Roblox UI)
-// Checks if the key submitted in Roblox is valid
-// ----------------------------------------------------
-app.get('/api/verify-key', (req, res) => {
-    const { userId, key } = req.query;
+//============================================================
+//LOOTLABSPOSTBACK
+//============================================================
+//
+//LootLabscallsthisaftertheusercompletesthetasks.
+//
+//ConfigureyourLootLabspostbackas:
+//
+//https://YOUR-DOMAIN.com/api/lootlabs-postback?click_id={CLICK_ID}&ip={IP}&unique_id={UNIQUE_ID}
+//
+//LootLabssends:
+//click_id
+//ip
+//unique_id
+//
+//click_idisthepuidweoriginallycreated.
+//============================================================
 
-    if (!userId || !key) {
-        return res.json({ valid: false, message: "Missing parameters" });
-    }
+app.get("/api/lootlabs-postback",(req,res)=>{
+constclickId=String(req.query.click_id||"").trim();
+constuniqueId=String(req.query.unique_id||"").trim();
+constip=String(req.query.ip||"").trim();
 
-    const keyData = activeKeys.get(key);
+if(!clickId){
+console.warn("[LootLabs]Missingclick_id");
 
-    if (!keyData) {
-        return res.json({ valid: false, message: "Invalid key" });
-    }
+returnres.status(400).send("Missingclick_id");
+}
 
-    if (Date.now() > keyData.expiresAt) {
-        activeKeys.delete(key);
-        return res.json({ valid: false, message: "Key expired" });
-    }
+constclaim=claims.get(clickId);
 
-    // Verify key belongs to the Roblox User attempting to redeem it
-    if (keyData.userId !== String(userId)) {
-        return res.json({ valid: false, message: "Key bound to another user" });
-    }
+if(!claim){
+console.warn(
+`[LootLabs]Unknownclaim:${clickId}`
+);
 
-    res.json({ valid: true, message: "Access Granted" });
+returnres.status(404).send("Unknownclaim");
+}
+
+//Preventthesameclaimfrombeingprocessedtwice
+if(claim.completed){
+console.log(
+`[LootLabs]Claimalreadycompleted:${clickId}`
+);
+
+returnres.status(200).send("OK");
+}
+
+//Markclaimascompleted
+claim.completed=true;
+claim.uniqueId=uniqueId||null;
+claim.completedAt=Date.now();
+claim.ip=ip||null;
+
+//GeneratetheactualBloxyHubkey
+constgeneratedKey=createKey();
+
+constcreatedAt=Date.now();
+constexpiresAt=createdAt+KEY_LIFETIME;
+
+keys.set(generatedKey,{
+userId:claim.userId,
+createdAt,
+expiresAt,
+claimId:clickId,
+uniqueId:uniqueId||null
 });
 
-app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+console.log(
+`[KeyGenerated]Key=${generatedKey}UserID=${claim.userId}`
+);
+
+//LootLabssuccessfullyreachedthecallback
+returnres.status(200).send("OK");
+});
+
+//============================================================
+//CHECKCLAIMSTATUS
+//============================================================
+//
+//ThisisusefulbecausetheRobloxplayerwon'treceivethe
+//generatedkeydirectlyfromtheLootLabspostback.
+//
+//Robloxcanpoll:
+//
+//GET/api/claim-status?claimId=XXXX
+//
+//OnceLootLabsfinishesthetask,thisendpointreturnsthekey.
+//============================================================
+
+app.get("/api/claim-status",(req,res)=>{
+constclaimId=String(req.query.claimId||"").trim();
+
+if(!claimId){
+returnres.status(400).json({
+success:false,
+error:"MissingclaimId"
+});
+}
+
+constclaim=claims.get(claimId);
+
+if(!claim){
+returnres.status(404).json({
+success:false,
+error:"Claimnotfoundorexpired"
+});
+}
+
+if(!claim.completed){
+returnres.json({
+success:true,
+completed:false,
+message:"LootLabstaskhasnotbeencompletedyet"
+});
+}
+
+//Findthekeybelongingtothisclaim
+letfoundKey=null;
+
+for(const[key,keyData]ofkeys.entries()){
+if(keyData.claimId===claimId){
+foundKey=key;
+break;
+}
+}
+
+if(!foundKey){
+returnres.status(404).json({
+success:false,
+error:"Keynotfound"
+});
+}
+
+constkeyData=keys.get(foundKey);
+
+if(Date.now()>keyData.expiresAt){
+keys.delete(foundKey);
+
+returnres.json({
+success:false,
+completed:true,
+error:"Keyexpired"
+});
+}
+
+returnres.json({
+success:true,
+completed:true,
+key:foundKey,
+expiresAt:keyData.expiresAt
+});
+});
+
+//============================================================
+//VERIFYKEY
+//============================================================
+//
+//Robloxcalls:
+//
+//GET/api/verify-key?userId=123456&key=BLOXY-XXXXXXXX
+//
+//Thekeymust:
+//1.Exist
+//2.Notbeexpired
+//3.BelongtothesameRobloxuser
+//============================================================
+
+app.get("/api/verify-key",(req,res)=>{
+constuserId=String(req.query.userId||"").trim();
+constkey=String(req.query.key||"").trim();
+
+if(!userId||!key){
+returnres.json({
+valid:false,
+message:"Missingparameters"
+});
+}
+
+constkeyData=keys.get(key);
+
+if(!keyData){
+returnres.json({
+valid:false,
+message:"Invalidkey"
+});
+}
+
+//Checkexpiration
+if(Date.now()>keyData.expiresAt){
+keys.delete(key);
+
+returnres.json({
+valid:false,
+message:"Keyexpired"
+});
+}
+
+//Checkownership
+if(keyData.userId!==userId){
+returnres.json({
+valid:false,
+message:"Keybelongstoanotheruser"
+});
+}
+
+returnres.json({
+valid:true,
+message:"AccessGranted",
+expiresAt:keyData.expiresAt
+});
+});
+
+//============================================================
+//HEALTHCHECK
+//============================================================
+
+app.get("/api/health",(req,res)=>{
+returnres.json({
+online:true,
+service:"BloxyHubKeySystem",
+claims:claims.size,
+activeKeys:keys.size
+});
+});
+
+//============================================================
+//STARTSERVER
+//============================================================
+
+app.listen(PORT,()=>{
+console.log(
+`BloxyHubKeySystemrunningonport${PORT}`
+);
 });
