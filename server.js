@@ -4,82 +4,90 @@ const app = express();
 
 app.use(express.json());
 
-// CONFIGURATION - Change these values!
-const OWNER_KEY = "SUPER_SECRET_OWNER_KEY_999"; 
-const LOOTLABS_BASE_LINK = "https://loot-labs.com/your-tier-link?custom="; 
+// In-memory key database (For production, consider using MongoDB / Quick.db)
+const activeKeys = new Map();
+
+// YOUR CONFIGURATION
 const PORT = process.env.PORT || 3000;
+const LOOTLABS_LINK_BASE = "https://loot-link.com/s?YOUR_LOOTLABS_ID"; // Replace with your actual LootLabs link
 
-// IN-MEMORY STORAGE
-const completedUsers = new Map();
-const validKeys = new Map();
+// ----------------------------------------------------
+// 1. HOME ROUTE (Fixes "Cannot GET /")
+// ----------------------------------------------------
+app.get('/', (req, res) => {
+    res.send('BloxyHub Key System Backend is Live!');
+});
 
-function generateKeyString() {
-    return 'KEY-' + crypto.randomBytes(8).toString('hex').toUpperCase();
-}
-
-// 1. Redirect to LootLabs
-app.get('/get-key', (req, res) => {
+// ----------------------------------------------------
+// 2. GET LINK ENDPOINT (Called by Roblox)
+// Returns LootLabs link with Roblox userId in the 'puid' parameter
+// ----------------------------------------------------
+app.get('/api/get-link', (req, res) => {
     const userId = req.query.userId;
-    if (!userId) return res.status(400).send('Missing userId parameter.');
-    const lootLabsUrl = `${LOOTLABS_BASE_LINK}${encodeURIComponent(userId)}`;
-    res.redirect(lootLabsUrl);
-});
-
-// 2. LootLabs Postback
-app.get('/lootlabs-postback', (req, res) => {
-    const userId = req.query.custom;
-    if (!userId) return res.status(400).send('Invalid postback.');
-
-    const expiry = Date.now() + (12 * 60 * 60 * 1000); // 12 hours
-    completedUsers.set(String(userId), expiry);
-
-    res.redirect(`/reveal-key?userId=${userId}`);
-});
-
-// 3. Key Reveal Page
-app.get('/reveal-key', (req, res) => {
-    const userId = String(req.query.userId);
-    const expiry = completedUsers.get(userId);
-
-    if (!expiry || Date.now() > expiry) {
-        return res.send('<h2>Access Denied: Please complete the LootLabs task first.</h2>');
+    if (!userId) {
+        return res.status(400).json({ error: 'Missing userId parameter' });
     }
 
-    const userKey = generateKeyString();
-    validKeys.set(userKey, expiry);
-    completedUsers.delete(userId);
-
-    res.send(`
-        <html>
-            <body style="font-family: Arial; text-align: center; padding-top: 50px; background-color: #121212; color: #fff;">
-                <h1>Your 12-Hour Key</h1>
-                <input type="text" value="${userKey}" readonly style="font-size: 20px; padding: 10px; width: 300px; text-align: center;" />
-                <p>This key will expire in 12 hours.</p>
-            </body>
-        </html>
-    `);
+    // Embed the Roblox userId into LootLabs via puid
+    const generatedLink = `${LOOTLABS_LINK_BASE}&puid=${userId}`;
+    res.json({ link: generatedLink });
 });
 
-// 4. Verification API for Roblox
-app.post('/api/verify-key', (req, res) => {
-    const { key } = req.body;
+// ----------------------------------------------------
+// 3. LOOTLABS POSTBACK ENDPOINT
+// LootLabs sends a request here when a user completes the link
+// ----------------------------------------------------
+app.get('/api/lootlabs-postback', (req, res) => {
+    const userId = req.query.click_id; // LootLabs returns puid as click_id
+    const uniqueId = req.query.unique_id;
 
-    if (!key) return res.json({ success: false, message: 'No key provided.' });
-
-    if (key === OWNER_KEY) {
-        return res.json({ success: true, isOwner: true, message: 'Owner Key Validated (Permanent).' });
+    if (!userId) {
+        return res.status(400).send('Missing click_id');
     }
 
-    const expiry = validKeys.get(key);
+    // Generate a secure 12-character key for the user
+    const generatedKey = "BLOXY-" + crypto.randomBytes(4).toString('hex').toUpperCase();
+    
+    // Save key valid for 24 hours (86400000 ms)
+    const expiresAt = Date.now() + (24 * 60 * 60 * 1000);
+    activeKeys.set(generatedKey, { userId, expiresAt });
 
-    if (!expiry) return res.json({ success: false, message: 'Invalid Key.' });
+    console.log(`[Key Generated] Key: ${generatedKey} for Roblox UserID: ${userId}`);
 
-    if (Date.now() > expiry) {
-        validKeys.delete(key);
-        return res.json({ success: false, message: 'Key Has Expired.' });
-    }
-
-    return res.json({ success: true, isOwner: false, message: 'Key Validated (12 Hours).' });
+    // Standard LootLabs response
+    res.status(200).send('OK');
 });
 
-app.listen(PORT, () => console.log(`Key System Server running on port ${PORT}`));
+// ----------------------------------------------------
+// 4. VERIFY KEY ENDPOINT (Called by Roblox UI)
+// Checks if the key submitted in Roblox is valid
+// ----------------------------------------------------
+app.get('/api/verify-key', (req, res) => {
+    const { userId, key } = req.query;
+
+    if (!userId || !key) {
+        return res.json({ valid: false, message: "Missing parameters" });
+    }
+
+    const keyData = activeKeys.get(key);
+
+    if (!keyData) {
+        return res.json({ valid: false, message: "Invalid key" });
+    }
+
+    if (Date.now() > keyData.expiresAt) {
+        activeKeys.delete(key);
+        return res.json({ valid: false, message: "Key expired" });
+    }
+
+    // Verify key belongs to the Roblox User attempting to redeem it
+    if (keyData.userId !== String(userId)) {
+        return res.json({ valid: false, message: "Key bound to another user" });
+    }
+
+    res.json({ valid: true, message: "Access Granted" });
+});
+
+app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+});
